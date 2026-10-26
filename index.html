@@ -3103,6 +3103,14 @@
           const me = this.roomInfo.players.find(p => p.id === this.myPlayerId);
           if (me) this.mySeat = me.seat;
           this.renderOnlineLobbyBox();
+        } else if (msg.type === 'SEAT_CHANGED') {
+          // 本人换座成功（2026-10-26 新增）
+          this.mySeat = msg.seat;
+          this.roomInfo = msg.room;
+          const me = this.roomInfo.players.find(p => p.id === this.myPlayerId);
+          if (me) this.mySeat = me.seat;
+          this.renderOnlineLobbyBox();
+          this.updateNetBadge(`已换到 ${this.mySeat + 1} 号位`);
         } else if (msg.type === 'STATE_SYNCED') {
           const prevChatTs = this.state && this.state.lastChat ? this.state.lastChat.ts : 0;
           const prevMatchId = this.state && this.state.matchId;
@@ -3156,6 +3164,31 @@
           }
           this.bc.postMessage({ type: 'ROOM_UPDATED', room: this.roomInfo, state: this.state });
           this.renderOnlineLobbyBox();
+        } else if (msg.type === 'BC_SEAT_REQ') {
+          // 同设备多窗口换座请求（2026-10-26 新增）：由房主端仲裁座位，避免多窗口同时改产生冲突
+          if (!this.roomInfo || this.roomInfo.hostId !== this.myPlayerId) return;
+          if (this.roomInfo.hasStarted) return;                     // 开局后锁定
+          const target = parseInt(msg.seat, 10);
+          const maxSeats = this.roomInfo.mode === '2v2' ? 4 : 2;
+          if (!(target >= 0 && target < maxSeats)) return;
+          const me = this.roomInfo.players.find(p => p.id === msg.playerId);
+          if (!me || me.seat === target) return;
+          const occupant = this.roomInfo.players.find(p => p.seat === target);
+          if (occupant && occupant.isAI) {
+            this.roomInfo.players.splice(this.roomInfo.players.indexOf(occupant), 1);
+          } else if (occupant) {
+            this.bc.postMessage({ type: 'BC_SEAT_REJECT', playerId: msg.playerId, message: '该座位已被占用', room: this.roomInfo });
+            this.bc.postMessage({ type: 'ROOM_UPDATED', room: this.roomInfo, state: this.state });
+            return;
+          }
+          me.seat = target;
+          this.roomInfo.players.sort((a, b) => a.seat - b.seat);
+          this.bc.postMessage({ type: 'ROOM_UPDATED', room: this.roomInfo, state: this.state });
+        } else if (msg.type === 'BC_SEAT_REJECT') {
+          if (msg.playerId !== this.myPlayerId) return;
+          this.roomInfo = msg.room || this.roomInfo;
+          this.renderOnlineLobbyBox();
+          this.updateNetBadge(msg.message || '换座失败');
         } else if (msg.type === 'ROOM_UPDATED') {
           this.roomInfo = msg.room;
           const me = this.roomInfo.players.find(p => p.id === this.myPlayerId);
@@ -3243,6 +3276,9 @@
         this.fillOnlineRoomWithAI();
         this.preset = 'online';
         this.mode = this.roomInfo.mode;
+        // 标记房间已开局：座位锁定（换座功能据此禁用）。
+        // WS 模式由服务端 hasStarted 权威下发；BC 模式无服务端，房主端自行标记并广播。
+        this.roomInfo.hasStarted = true;
         const seatLabels1v1 = ['①红方', '②黑方'];
         const seatLabels2v2 = ['红A', '黑C', '红B', '黑D'];
         const roleCodes2v2  = ['A', 'C', 'B', 'D'];
@@ -3323,20 +3359,64 @@
         if (!this.roomInfo) {
           return;
         }
-        title.textContent = `房间 #${this.roomInfo.code} · 你在 ${this.mySeat + 1}号位`;
         const maxSeats = this.roomInfo.mode === '2v2' ? 4 : 2;
         const seatNames = ['① 红A (1号)', '② 黑C (接A球)', '③ 红B (搭档·接C球)', '④ 黑D (接B球)'];
+        // 锁定标志用服务端下发的 hasStarted（room.state 是否已建立）。
+        // ⚠️ 不能用 !!this.state —— App 初始化时 this.state 就有值（targetScore 等），恒为真。
+        const isLocked = !!this.roomInfo.hasStarted;
+        title.textContent = `房间 #${this.roomInfo.code} · 你在 ${this.mySeat + 1}号位`
+          + (isLocked ? ' · 已开局' : ' · 点空位可换座');
 
         grid.innerHTML = '';
         for (let i = 0; i < maxSeats; i++) {
           const p = this.roomInfo.players.find(x => x.seat === i);
+          const isMine = (i === this.mySeat);
+          const isEmpty = !p;
+          // 空位可点换座（开局前）；AI 位也可点（将顶掉 AI）
+          const canClaim = !isLocked && !isMine && (isEmpty || (p && p.isAI));
+          let cls = 'p-2 rounded-xl border-2 bg-amber-50 border-[#4a2810]/50';
+          if (isMine) cls = 'p-2 rounded-xl border-2 bg-amber-200 border-[#4a2810]';
+          else if (canClaim) cls = 'p-2 rounded-xl border-2 border-dashed border-emerald-500 bg-emerald-50';
           const div = document.createElement('div');
-          div.className = `p-2 rounded-xl border-2 ${i === this.mySeat ? 'bg-amber-200 border-[#4a2810]' : 'bg-amber-50 border-[#4a2810]/50'}`;
+          div.className = cls;
+          if (canClaim) {
+            div.style.cursor = 'pointer';
+            div.classList.add('active:opacity-70');
+            div.title = (p && p.isAI) ? '点这里顶掉 AI 坐这个位' : '点这里换到这个位';
+          }
           div.innerHTML = `
             <div class="text-[10px] text-[#7c4722] font-bold">${seatNames[i]}</div>
-            <div class="font-black text-[#4a2810] mt-0.5 truncate">${p ? p.name : '等待加入...'}</div>
+            <div class="font-black text-[#4a2810] mt-0.5 truncate">${p ? (p.isAI ? p.name + ' 🤖' : p.name) : '空位 · 可选'}</div>
+            ${canClaim ? '<div class="text-[10px] font-black text-emerald-700 mt-0.5">👆 点我坐这</div>' : ''}
           `;
+          if (canClaim) {
+            div.addEventListener('click', () => this.requestChangeSeat(i));
+          }
           grid.appendChild(div);
+        }
+      },
+
+      /**
+       * 请求换座（2026-10-26 新增）
+       * 服务端 CHANGE_SEAT 负责原子校验：目标位是否被别人抢占、是否已开局。
+       */
+      requestChangeSeat(seat) {
+        // 锁定判定用服务端下发的 hasStarted（不能用 this.state，App 初始化时它就有值）
+        if (this.roomInfo && this.roomInfo.hasStarted) {
+          this.updateNetBadge('对局已开始，座位已锁定');
+          return;
+        }
+        if (seat === this.mySeat) return;
+        if (this.netMode === 'ws' && this.ws) {
+          // 联机房间：服务端 CHANGE_SEAT 负责原子校验（是否被抢、是否已开局）
+          this.ws.send(JSON.stringify({ type: 'CHANGE_SEAT', seat }));
+          this.updateNetBadge('正在换到 ' + (seat + 1) + ' 号位…');
+        } else if (this.netMode === 'bc' && this.bc) {
+          // 同设备多窗口：由房主端仲裁
+          this.bc.postMessage({ type: 'BC_SEAT_REQ', playerId: this.myPlayerId, seat });
+          this.updateNetBadge('正在换到 ' + (seat + 1) + ' 号位…');
+        } else {
+          this.updateNetBadge('换座仅支持联机房间模式');
         }
       },
 
@@ -4035,6 +4115,26 @@ wss.on('connection', (ws) => {
       room.players.push({ id: playerId, name: data.playerName || ('玩家' + (seat + 1)), seat, ws });
       room.players.sort((a, b) => a.seat - b.seat);
       ws.send(JSON.stringify({ type: 'ROOM_JOINED', seat, room: publicRoom(room), state: room.state }));
+      broadcast(room, { type: 'ROOM_UPDATED', room: publicRoom(room) });
+    } else if (data.type === 'CHANGE_SEAT') {
+      // 换座（2026-10-26 新增）：开局前可点空位改坐哪
+      const room = rooms.get(roomCode); if (!room || !playerId) return;
+      if (room.state) return ws.send(JSON.stringify({ type: 'ERROR', message: '对局已开始，座位已锁定' }));
+      const target = parseInt(data.seat, 10);
+      const max = room.mode === '2v2' ? 4 : 2;
+      if (!(target >= 0 && target < max)) return ws.send(JSON.stringify({ type: 'ERROR', message: '无效座位' }));
+      const me = room.players.find(p => p.id === playerId);
+      if (!me || me.seat === target) return;
+      const occupant = room.players.find(p => p.seat === target);
+      if (occupant && occupant.isAI) {
+        room.players.splice(room.players.indexOf(occupant), 1);
+      } else if (occupant) {
+        ws.send(JSON.stringify({ type: 'ERROR', message: '该座位已被占用', room: publicRoom(room) }));
+        return broadcast(room, { type: 'ROOM_UPDATED', room: publicRoom(room) });
+      }
+      me.seat = target;
+      room.players.sort((a, b) => a.seat - b.seat);
+      ws.send(JSON.stringify({ type: 'SEAT_CHANGED', playerId, seat: target, room: publicRoom(room) }));
       broadcast(room, { type: 'ROOM_UPDATED', room: publicRoom(room) });
     } else if (data.type === 'FILL_AI') {
       const room = rooms.get(roomCode); if (!room) return;
