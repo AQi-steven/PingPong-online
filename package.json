@@ -1,7 +1,7 @@
 {
   "name": "pingpong-boardgame-online",
   "version": "1.0.0",
-  "description": "《乒乓》实体桌游电子版 - 1~4人Web客户端与WebSocket联机服务端",
+  "description": "PING PONG - digital version of the physical table-tennis card game. Single-file web client + WebSocket multiplayer server.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
