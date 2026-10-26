@@ -1,0 +1,12 @@
+{
+  "name": "pingpong-boardgame-online",
+  "version": "1.0.0",
+  "description": "《乒乓》实体桌游电子版 - 1~4人Web客户端与WebSocket联机服务端",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}
